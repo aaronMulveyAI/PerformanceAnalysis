@@ -1,0 +1,997 @@
+---
+title: "Conversor"
+author: "Aaron Mulvey"
+date: "18/3/2021""
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# Condicional para instalar y cargar paquetes necesarios
+packages <- c(
+  "tidyverse", "dplyr", "ggplot2", "readxl", "lubridate",
+  "imputeTS", "Hmisc", "TTR", "dygraphs", "zoo", "tseries", "VIM", "patchwork"
+)
+
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+# Paquete de Mike L. Smith conversacion con el en Gmail
+
+if(!requireNamespace("remotes")) {
+    install.packages("remotes")
+}
+remotes::install_github("grimbough/FITfileR")
+
+library(FITfileR)
+
+# Configuración global de knitr
+knitr::opts_chunk$set(echo = TRUE)
+
+# Limpiar el entorno de trabajo
+#rm(list = ls())
+
+# Configuración de opciones globales
+options(scipen = 999)
+
+
+```
+
+## Definir Variables para Reproducción
+
+Las siguientes variables definen rutas, nombres de archivos y configuraciones necesarias para garantizar la reproducibilidad del análisis.
+
+```{r definir_variables, echo=TRUE}
+
+# Configuración del directorio de trabajo
+setwd("../Scripts")
+
+# Variables generales
+atleta <- "June"
+directorio <- "../Atletas"
+
+# Subdirectorios para importar y exportar datos
+subdir_importar <- "Import"
+subdir_exportar <- "Export"
+
+# Nombres de archivos
+archivos <- list(
+  fit_importar = "sesion1.rda",
+  csv_importar = "metricas.xlsx",
+  guardar_sesiones = "sesiones.rda",
+  guardar_completo = "sesiones_completo.rda",
+  guardar_limpias = "sesiones_limpias.rda",
+  guardar_records = "records.rda",
+  guardar_records_lista = "records_lista.rda",
+  guardar_resumenes = "records_resumenes.rda",
+  guardar_laps = "laps.rda",
+  guardar_laps_lista = "laps_lista.rda"
+)
+
+# Rutas de importación y exportación
+ruta_importar <- file.path(directorio, atleta, subdir_importar)
+ruta_exportar <- file.path(directorio, atleta, subdir_exportar)
+
+# Lista de archivos FIT en la carpeta de importación
+archivos_fit <- list.files(ruta_importar, full.names = TRUE)
+
+
+```
+
+
+## Leer Nuevos Archivos
+
+En este paso, se procesan los archivos FIT para extraer información relevante de sesiones y registros. 
+Se aplican funciones para leer y unificar los datos en dataframes estructurados.
+
+```{r leer_archivos, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Leer sesiones desde archivos FIT
+sesiones <- archivos_fit %>%
+  lapply(function(file) {
+    getMessagesByType(readFitFile(file), "session")
+  }) %>%
+  bind_rows() # Unir todas las sesiones en un único dataframe
+
+# Leer registros desde archivos FIT
+records_lista_nueva <- archivos_fit %>%
+  lapply(function(file) {
+    getMessagesByType(readFitFile(file), "record")
+  }) %>%
+  lapply(bind_rows) # Unir los registros leídos en una lista de dataframes
+
+###################### CREAR FUNCION DE LECTURA UNO DE LOS LAPS
+
+laps_lista_nueva <- archivos_fit %>%
+  lapply(function(file) {
+    getMessagesByType(readFitFile(file), "lap")
+  })
+
+
+
+```
+
+
+## Importar Datos Existentes
+
+En este paso, se cargan los datos previamente procesados y guardados en archivos locales. 
+Esto incluye sesiones antiguas, registros históricos, datos de Excel y laps previas.
+
+```{r importar_datos_viejos, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Cargar datos de sesiones antiguas
+load(paste(file = paste(ruta_exportar,
+                        archivos$guardar_sesiones,
+                        sep = '/')))
+
+# Cargar registros (records) antiguos
+load(paste(file = paste(ruta_exportar,
+                        archivos$guardar_records_lista,
+                        sep = '/')))
+
+# Importar datos desde un archivo Excel
+excel <- read_excel(file.path(ruta_exportar, archivos$csv_importar))
+
+  
+
+# Cargar datos de laps previas
+load(paste(file = paste(ruta_exportar,
+                        archivos$guardar_laps_lista,
+                        sep = '/')))
+
+```
+
+
+```{r}
+###################### UNIMOS SESIONES NUEVAS Y VIEJAS
+
+sesiones_viejas <- rbind.data.frame(sesiones_viejas,
+                                    sesiones)
+
+###################### UNIMOS LISTAS DE RECORDS
+
+records_lista <- append(records_lista,
+                        records_lista_nueva)
+
+
+###################### CREAMOS UN GRAN DATRAFRAME CON LOS REGISTROS
+
+records_dataframe <- records_lista %>% 
+  bind_rows()
+
+
+###################### UNIMOS LAPS ANTIGUAS Y LAPS NUEVAS
+
+laps_lista <- append(laps_lista,
+                     laps_lista_nueva)
+
+###################### CREAR DATAFRAME LAPS
+
+laps_lista <- lapply(laps_lista, function(df) {
+  if ("left_right_balance" %in% colnames(df)) {
+    df <- df %>% mutate(left_right_balance = as.character(left_right_balance))
+  }
+  return(df)
+})
+
+# Unir la lista de laps en un único dataframe
+laps_dataframe <- laps_lista %>% 
+  bind_rows()
+
+
+```
+
+
+## Crear Cadena de Unión entre Excel y Archivo Binario
+
+En este paso, se crea un dataframe consolidado a partir de las sesiones antiguas, descomponiendo la columna de timestamp y formateando las fechas.
+
+```{r crear_cadena_union, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### CREAMOS DATAFRAME DE SESIONES CON CADENA DE UNION
+# SEPARA LA COLUMNA timestamp EN FECHA Y HORA, Y FORMATEA LA FECHA
+sesiones_union <- sesiones_viejas %>% 
+  tidyr::separate(col = timestamp,
+                  into = c("date", "hour"),
+                  sep = " ") %>% 
+  mutate(date = ymd(date)) %>%  # CONVIERTE LA COLUMNA date A FORMATO DE FECHA
+  mutate(hour = NULL)           # ELIMINA LA COLUMNA hour, YA NO ES NECESARIA
+  
+```
+
+## Detección y Tratamiento de Outliers en las Sesiones
+
+En este paso, se detectan y tratan los valores atípicos en las métricas principales de las sesiones. Se utiliza un enfoque combinado de visualización, sustitución manual y métodos automáticos.
+
+```{r deteccion_tratamiento_outliers, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### DETECCIÓN DE OUTLIERS
+# CREAR UNA LISTA DE GRÁFICOS PARA CADA MÉTRICA
+graficos_originales <- lapply(metricas, function(metrica) {
+  ggplot(sesiones_viejas, aes_string(y = metrica)) +
+    geom_boxplot(fill = "skyblue", color = "darkblue", outlier.color = "red", outlier.size = 2) +
+    labs(title = paste("Outliers en", metrica), y = metrica) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+})
+
+###################### SUSTITUCIÓN DE OUTLIERS Y GRAFICAR MÉTRICAS LIMPIAS
+# APLICAR LA FUNCIÓN AUTOMÁTICA PARA TRATAR OUTLIERS
+sesiones_union <- sesiones_union %>%
+  mutate(across(all_of(metricas), impute_outliers))
+
+# CREAR UNA LISTA DE GRÁFICOS PARA MÉTRICAS LIMPIAS
+graficos_limpios <- lapply(metricas, function(metrica) {
+  ggplot(sesiones_union, aes_string(y = metrica)) +
+    geom_boxplot(fill = "lightgreen", color = "darkgreen", outlier.color = "red", outlier.size = 2) +
+    labs(title = paste("Sin Outliers:", metrica), y = metrica) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+})
+
+###################### COMBINAR GRÁFICOS ORIGINALES Y LIMPIOS
+# USAR patchwork PARA MOSTRAR LOS GRÁFICOS LADO A LADO
+
+graficos_combinados <- list()
+for (i in seq_along(metricas)) {
+  graficos_combinados[[i]] <- graficos_originales[[i]] | graficos_limpios[[i]]
+}
+
+# MOSTRAR TODOS LOS GRÁFICOS
+for (grafico in graficos_combinados) {
+  print(grafico)
+}
+
+```
+
+## Crear Variables Nuevas y Unir Dataframes
+
+En este paso, se crean nuevas variables basadas en las métricas existentes y se eliminan los valores atípicos. Finalmente, se combinan los datos de las sesiones con los datos de Excel.
+
+```{r crear_variables_unir_dataframes, echo=TRUE, message=FALSE, warning=FALSE}
+
+library(ggplot2)
+
+###################### CREACIÓN DE LA VARIABLE EFICIENCIA
+# CALCULAMOS LA EFICIENCIA COMO RELACIÓN ENTRE normalized_power Y avg_heart_rate
+sesiones_union <- sesiones_union %>%
+  mutate(eficiencia = normalized_power / avg_heart_rate)
+
+# DETECCIÓN DE OUTLIERS EN EFICIENCIA
+ggplot(sesiones_union, aes(y = eficiencia)) +
+  geom_boxplot(fill = "skyblue", color = "darkblue", outlier.color = "red", outlier.size = 2) +
+  labs(title = "Detección de Outliers en Eficiencia", y = "Eficiencia") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# IMPUTACIÓN AUTOMÁTICA DE OUTLIERS EN EFICIENCIA
+sesiones_union$eficiencia <- impute_outliers(sesiones_union$eficiencia)
+
+###################### CREACIÓN DE LA VARIABLE FLUIDEZ DEL TORQUE
+# CALCULAMOS LA FLUIDEZ DEL TORQUE COMO RELACIÓN ENTRE max_power Y avg_power
+sesiones_union <- sesiones_union %>%
+  mutate(fluidez_torque = (max_power / avg_power) / 100)
+
+# DETECCIÓN DE OUTLIERS EN FLUIDEZ DEL TORQUE
+ggplot(sesiones_union, aes(y = fluidez_torque)) +
+  geom_boxplot(fill = "lightgreen", color = "darkgreen", outlier.color = "red", outlier.size = 2) +
+  labs(title = "Detección de Outliers en la Fluidez de Pedaleo", y = "Fluidez Torque") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# IMPUTACIÓN AUTOMÁTICA DE OUTLIERS EN FLUIDEZ DEL TORQUE
+sesiones_union$fluidez_torque <- impute_outliers(sesiones_union$fluidez_torque)
+
+###################### CREACIÓN DE LA VARIABLE TORQUE
+# CALCULAMOS EL TORQUE COMO PROMEDIO DE POTENCIA DIVIDIDO POR CADENCIA
+sesiones_union <- sesiones_union %>%
+  mutate(torque = avg_power / ((avg_cadence * 2 * pi) / 60))
+
+# DETECCIÓN DE OUTLIERS EN TORQUE
+ggplot(sesiones_union, aes(y = torque)) +
+  geom_boxplot(fill = "lightcoral", color = "darkred", outlier.color = "red", outlier.size = 2) +
+  labs(title = "Detección de Outliers en el Torque", y = "Torque") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# IMPUTACIÓN AUTOMÁTICA DE OUTLIERS EN TORQUE
+sesiones_union$torque <- impute_outliers(sesiones_union$torque)
+
+###################### UNIR DATOS DE SESIONES CON DATOS DE EXCEL
+# REALIZAMOS UNA UNIÓN IZQUIERDA ENTRE LOS DATOS DE EXCEL Y LAS SESIONES
+sesiones_completo <- left_join(excel, sesiones_union, by = "date")
+
+```
+## Detección y Tratamiento de Outliers en Records
+
+En este paso, se identifican y tratan los valores atípicos en las métricas principales del dataframe de registros (records). Se enfocan en potencia, frecuencia cardíaca y cadencia.
+
+```{r deteccion_outliers_records, echo=TRUE, message=FALSE, warning=FALSE}
+
+
+###################### DETECCIÓN DE OUTLIERS EN MÉTRICAS DE RECORDS
+# GRAFICAMOS LOS OUTLIERS EN LAS MÉTRICAS CLAVE
+metricas_records <- c("power", "heart_rate", "cadence")
+
+for (metrica in metricas_records) {
+  p <- ggplot(records_dataframe, aes_string(y = metrica)) +
+    geom_boxplot(fill = "lightblue", color = "darkblue", outlier.color = "red", outlier.size = 2) +
+    labs(
+      title = paste("Detección de Outliers en", metrica),
+      y = metrica
+    ) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+  print(p)  # Imprimir explícitamente el gráfico
+}
+
+
+###################### TRATAMIENTO DE OUTLIERS EN POTENCIA
+# ELIMINAR OUTLIERS DE POTENCIA PONIENDO NA EN VALORES EXTREMOS
+records_limpia <- records_dataframe %>%
+  mutate(power = ifelse(power > 3000, NA, power))
+
+###################### GRAFICAR DIFERENCIAS EN POTENCIA
+# COMPARAR LA POTENCIA ORIGINAL Y LA POTENCIA SIN OUTLIERS
+ggplot() +
+  geom_boxplot(data = records_dataframe, aes(y = power), fill = "lightcoral", color = "darkred", outlier.color = "red", outlier.size = 2) +
+  labs(
+    title = "Potencia Original",
+    y = "Power"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+ggplot() +
+  geom_boxplot(data = records_limpia, aes(y = power), fill = "lightgreen", color = "darkgreen", outlier.color = "red", outlier.size = 2) +
+  labs(
+    title = "Potencia Sin Outliers",
+    y = "Power"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+###################### CONSIDERACIONES FUTURAS
+# LLEGADOS A ESTE PUNTO TENEMOS REGISTROS ERRÓNEOS EN heart_rate.
+# PARA MEJORAR ESTOS REGISTROS, SE PROPONE USAR UNA SERIE TEMPORAL 
+# MULTIVARIANTE QUE RELACIONE LA POTENCIA Y FRECUENCIA CARDIACA.
+# ESTE ENFOQUE SERÁ IMPLEMENTADO POSTERIORMENTE.
+
+```
+## Guardar Datos Procesados
+
+Este paso almacena los datos procesados en archivos locales para su uso posterior. Cada conjunto de datos se guarda en su respectivo archivo dentro de la carpeta de exportación.
+
+```{r guardar_datos, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### GUARDAR SESIONES VIEJAS
+# ALMACENAR EL DATAFRAME DE SESIONES ANTIGUAS EN UN ARCHIVO
+save(sesiones_viejas, 
+     file = file.path(ruta_exportar, archivos$guardar_sesiones))
+
+###################### GUARDAR DATOS COMPLETOS DE SESIONES
+# ALMACENAR LA UNIÓN DE DATOS DE SESIONES Y EXCEL EN UN ARCHIVO
+save(sesiones_completo, 
+     file = file.path(ruta_exportar, archivos$guardar_completo))
+
+###################### GUARDAR LISTA DE RECORDS
+# ALMACENAR LA LISTA COMPLETA DE RECORDS PROCESADOS EN UN ARCHIVO
+save(records_lista, 
+     file = file.path(ruta_exportar, archivos$guardar_records_lista))
+
+###################### GUARDAR DATAFRAME DE RECORDS
+# ALMACENAR EL DATAFRAME DE RECORDS UNIFICADO EN UN ARCHIVO
+save(records_dataframe, 
+     file = file.path(ruta_exportar, archivos$guardar_records))
+
+```
+
+## Limpieza y Preparación de Datos Unificados
+
+En este paso, se seleccionan variables relevantes, se imputan valores faltantes y se crean nuevas variables para análisis avanzados.
+
+```{r limpieza_datos_unificados, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### SELECCIÓN DE VARIABLES CLAVE
+# FILTRAMOS Y RENOMBRAMOS LAS VARIABLES RELEVANTES
+sesion_limpia <- sesiones_completo %>% 
+  dplyr::select(
+    fecha = date,
+    peso,
+    HRV,
+    fc_basal = FcBasal,
+    fc_media = avg_heart_rate,
+    fc_max = FcMax,
+    potencia_media = avg_power,
+    potencia_normal = normalized_power,
+    volumen = total_timer_time,
+    intensidad = intensity_factor,
+    distancia_total = total_distance,
+    distancia_ascendida = total_ascent,
+    TSS_TP = training_stress_score,
+    deporte = sport,
+    categoria = sub_sport,
+    eficiencia,
+    torque,
+    fluidez_torque,
+    FTP,
+    T_05,
+    T_012,
+    T_030,
+    T_1,
+    T_5,
+    T_20,
+    T_60
+  ) %>% 
+  mutate(ftp = FTP)
+
+###################### IMPUTACIÓN DE VALORES FALTANTES
+
+# HRV - USAMOS MODELO AUTOREGRESIVO (auto.arima)
+sesion_limpia$HRV <- na_kalman(sesion_limpia$HRV, model = "auto.arima")
+
+# PESO Y FC_BASAL - USAMOS MEDIAS MÓVILES
+sesion_limpia$peso <- na_ma(sesion_limpia$peso, k = 10)
+sesion_limpia$fc_basal <- na_ma(sesion_limpia$fc_basal, k = 10)
+
+# FTP Y FC_MAX - USAMOS VALOR ANTERIOR
+sesion_limpia$FTP <- na_locf(sesion_limpia$FTP)
+sesion_limpia$fc_max <- na_locf(sesion_limpia$fc_max)
+
+# OTRAS VARIABLES - SUSTITUIMOS FALTANTES POR CERO
+vars_a_imputar <- c(
+  "TSS_TP", "volumen", "intensidad", "fc_media",
+  "potencia_media", "potencia_normal", "distancia_total", 
+  "distancia_ascendida"
+)
+sesion_limpia <- sesion_limpia %>%
+  mutate(across(all_of(vars_a_imputar), ~ replace_na(., 0)))
+
+###################### CREACIÓN DE VARIABLES DE FATIGA
+# ATL_TP (ACUTE TRAINING LOAD) Y CTL_TP (CHRONIC TRAINING LOAD)
+sesion_limpia <- sesion_limpia %>%
+  mutate(
+    ATL_TP = EMA(TSS_TP, n = 7),
+    CTL_TP = EMA(TSS_TP, n = 42)
+  )
+
+# AJUSTE DE VALORES FALTANTES PARA FATIGA
+sesion_limpia$ATL_TP[1:1] <- 60
+sesion_limpia$ATL_TP <- na_ma(sesion_limpia$ATL_TP, k = 7, weighting = "exponential")
+sesion_limpia$CTL_TP[1:1] <- 60
+sesion_limpia$CTL_TP <- na_kalman(sesion_limpia$CTL_TP, model = "auto.arima")
+
+###################### CREACIÓN DE VARIABLES DERIVADAS
+# TSB_TP (TRAINING STRESS BALANCE)
+sesion_limpia <- sesion_limpia %>%
+  mutate(TSB_TP = CTL_TP - ATL_TP)
+
+# IDENTIFICADOR DEL ATLETA
+sesion_limpia <- sesion_limpia %>%
+  mutate(atleta = atleta)
+
+###################### VARIABLES TEMPORALES
+# AGREGAMOS SEMANA Y MES A PARTIR DE LA FECHA
+sesion_limpia <- sesion_limpia %>%
+  mutate(
+    semana = strftime(fecha, "%V"),
+    mes = strftime(fecha, "%m")
+  )
+
+```
+
+## Guardar Sesión Limpia
+
+Este paso almacena la sesión limpia con las variables seleccionadas y los datos imputados, asegurando su disponibilidad para futuros análisis.
+
+```{r guardar_sesion_limpia, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### GUARDAR SESION LIMPIA
+# ALMACENAMOS EL DATAFRAME LIMPIO EN UN ARCHIVO LOCAL
+save(sesion_limpia, 
+     file = file.path(ruta_exportar, archivos$guardar_limpias))
+
+
+```
+
+## Comparación: Training Peaks vs Datos Calculados
+
+En este paso, se crean variables propias de carga (TSS, ATL, CTL, TSB) a partir de los datos limpios y se comparan con los cálculos de Training Peaks.
+
+```{r training_peaks_vs_calculados, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### CREACIÓN DE VARIABLES DE CARGA PROPIAS PARA COMPARAR
+# CALCULAMOS VARIABLES BASADAS EN POTENCIA, VOLUMEN E FTP
+variables_calculadas <- sesion_limpia %>%
+  dplyr::select(
+    fecha,
+    FTP,
+    potencia_normal,
+    volumen
+  ) %>%
+  mutate(
+    intensidad = potencia_normal / FTP, # CALCULAMOS INTENSIDAD RELATIVA
+    TSS = (volumen * potencia_normal * intensidad) / (FTP * 3600) * 100, # CALCULAMOS TSS
+    ATL = EMA(TSS, n = 7),             # CALCULAMOS ATL (ACUTE TRAINING LOAD)
+    CTL = EMA(TSS, n = 42)             # CALCULAMOS CTL (CHRONIC TRAINING LOAD)
+  )
+
+###################### IMPUTACIÓN DE VALORES FALTANTES EN CARGA
+
+# IMPUTACIÓN DE ATL (CARGA AGUDA) CON MEDIA MÓVIL EXPONENCIAL
+variables_calculadas$ATL[1] <- 60
+variables_calculadas$ATL <- na_ma(variables_calculadas$ATL, k = 7, weighting = "exponential")
+
+# IMPUTACIÓN DE CTL (CARGA CRÓNICA) CON MODELO AUTOREGRESIVO
+variables_calculadas$CTL[1] <- 60
+variables_calculadas$CTL <- na_kalman(variables_calculadas$CTL, model = "auto.arima")
+
+###################### CREACIÓN DE LA VARIABLE DE BALANCE DE ESTRÉS
+# TSB (TRAINING STRESS BALANCE) COMO DIFERENCIA ENTRE CTL Y ATL
+variables_calculadas <- variables_calculadas %>%
+  mutate(TSB = CTL - ATL)
+
+```
+
+
+## Graficar Diferencias: Intensidad Calculada vs Training Peaks
+
+Este paso compara visualmente la intensidad calculada con los datos proporcionados por Training Peaks utilizando gráficos interactivos.
+
+```{r graficar_diferencias_intensidad, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### PREPARAR DATOS PARA GRAFICAR
+# COMBINAMOS LAS INTENSIDADES CALCULADAS Y DE TRAINING PEAKS EN UNA SERIE TEMPORAL
+variables_intensidad <- ts(
+  cbind.data.frame(
+    Calculada = variables_calculadas$intensidad,     # INTENSIDAD CALCULADA
+    TrainingPeaks = sesion_limpia$intensidad         # INTENSIDAD DESDE TRAINING PEAKS
+  )
+)
+
+###################### GRAFICAR DIFERENCIAS EN INTENSIDAD
+# USAMOS dygraph PARA CREAR UN GRÁFICO INTERACTIVO
+dygraph(variables_intensidad) %>%
+  dySeries("Calculada", label = "Intensidad Calculada") %>%
+  dySeries("TrainingPeaks", label = "Intensidad Training Peaks") %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(2, "Set1")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Intensidad Relativa") %>%
+  dyAxis("x", label = "Tiempo") %>%
+  dyRangeSelector()
+
+```
+
+
+## Graficar Diferencias: TSS Calculado vs Training Peaks
+
+Este paso compara visualmente el Training Stress Score (TSS) calculado con el reportado por Training Peaks utilizando gráficos interactivos.
+
+```{r graficar_diferencias_tss, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### PREPARAR DATOS PARA GRAFICAR
+# COMBINAMOS EL TSS CALCULADO Y EL DE TRAINING PEAKS EN UNA SERIE TEMPORAL
+variables_carga <- ts(
+  cbind.data.frame(
+    Calculado = variables_calculadas$TSS,    # TSS CALCULADO
+    TrainingPeaks = sesion_limpia$TSS_TP     # TSS DESDE TRAINING PEAKS
+  )
+)
+
+###################### GRAFICAR DIFERENCIAS EN TSS
+# USAMOS dygraph PARA CREAR UN GRÁFICO INTERACTIVO
+dygraph(variables_carga) %>%
+  dySeries("Calculado", label = "TSS Calculado") %>%
+  dySeries("TrainingPeaks", label = "TSS Training Peaks") %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(2, "Set2")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Training Stress Score (TSS)") %>%
+  dyAxis("x", label = "Tiempo") %>%
+  dyRangeSelector()
+
+```
+
+
+## Graficar Diferencias: ATL Calculado vs Training Peaks
+
+Este paso compara visualmente la carga aguda (ATL) calculada con los datos proporcionados por Training Peaks.
+
+```{r graficar_diferencias_atl, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### PREPARAR DATOS PARA GRAFICAR
+# COMBINAMOS EL ATL CALCULADO Y EL DE TRAINING PEAKS EN UNA SERIE TEMPORAL
+variables_carga_aguda <- ts(
+  cbind.data.frame(
+    Calculado = variables_calculadas$ATL,     # ATL CALCULADO
+    TrainingPeaks = sesion_limpia$ATL_TP      # ATL DESDE TRAINING PEAKS
+  )
+)
+
+###################### GRAFICAR DIFERENCIAS EN ATL
+# USAMOS dygraph PARA CREAR UN GRÁFICO INTERACTIVO
+dygraph(variables_carga_aguda) %>%
+  dySeries("Calculado", label = "ATL Calculado") %>%
+  dySeries("TrainingPeaks", label = "ATL Training Peaks") %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(2, "Set1")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Acute Training Load (ATL)") %>%
+  dyAxis("x", label = "Tiempo") %>%
+  dyRangeSelector()
+
+
+```
+
+## Graficar Diferencias: CTL Calculado vs Training Peaks
+
+Este paso compara visualmente la carga crónica (CTL) calculada con los datos proporcionados por Training Peaks.
+
+```{r graficar_diferencias_ctl, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### PREPARAR DATOS PARA GRAFICAR
+# COMBINAMOS EL CTL CALCULADO Y EL DE TRAINING PEAKS EN UNA SERIE TEMPORAL
+variables_carga_cronica <- ts(
+  cbind.data.frame(
+    Calculado = variables_calculadas$CTL,     # CTL CALCULADO
+    TrainingPeaks = sesion_limpia$CTL_TP      # CTL DESDE TRAINING PEAKS
+  )
+)
+
+###################### GRAFICAR DIFERENCIAS EN CTL
+# USAMOS dygraph PARA CREAR UN GRÁFICO INTERACTIVO
+dygraph(variables_carga_cronica) %>%
+  dySeries("Calculado", label = "CTL Calculado") %>%
+  dySeries("TrainingPeaks", label = "CTL Training Peaks") %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(2, "Set2")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Chronic Training Load (CTL)") %>%
+  dyAxis("x", label = "Tiempo") %>%
+  dyRangeSelector()
+
+```
+
+
+## Graficar Diferencias: TSB Calculado vs Training Peaks
+
+Este paso compara visualmente el estado de forma (TSB) calculado con los datos proporcionados por Training Peaks.
+
+```{r graficar_diferencias_tsb, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### PREPARAR DATOS PARA GRAFICAR
+# COMBINAMOS EL TSB CALCULADO Y EL DE TRAINING PEAKS EN UNA SERIE TEMPORAL
+variables_forma <- ts(
+  cbind.data.frame(
+    Calculado = variables_calculadas$TSB,     # TSB CALCULADO
+    TrainingPeaks = sesion_limpia$TSB_TP      # TSB DESDE TRAINING PEAKS
+  )
+)
+
+###################### GRAFICAR DIFERENCIAS EN TSB
+# USAMOS dygraph PARA CREAR UN GRÁFICO INTERACTIVO
+dygraph(variables_forma) %>%
+  dySeries("Calculado", label = "TSB Calculado") %>%
+  dySeries("TrainingPeaks", label = "TSB Training Peaks") %>%
+  dyOptions(colors = RColorBrewer::brewer.pal(2, "Dark2")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Training Stress Balance (TSB)") %>%
+  dyAxis("x", label = "Tiempo") %>%
+  dyRangeSelector()
+
+
+
+```
+
+## Relación entre Eficiencia y Tiempo/Volumen
+
+En este paso, se analiza la relación entre la eficiencia del atleta y su evolución temporal, así como su relación con el volumen de entrenamiento.
+
+```{r relacion_eficiencia_tiempo, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### ANALIZAR RELACION EFICIENCIA Y TIEMPO
+# CALCULAMOS LA EFICIENCIA PROMEDIO POR SEMANA
+relacion_eficiencia_tiempo <- sesion_limpia %>%
+  dplyr::select(fecha, eficiencia, semana) %>%
+  group_by(semana) %>%
+  summarise(
+    eficiencia = mean(ifelse(eficiencia == 0, NA, eficiencia), na.rm = TRUE), 
+    fecha = first(fecha)
+  )
+
+###################### ANALIZAR RELACION EFICIENCIA Y VOLUMEN
+# CALCULAMOS LA RELACION ENTRE EFICIENCIA Y VOLUMEN POR SEMANA
+relacion_eficiencia_volumen <- sesion_limpia %>%
+  dplyr::select(eficiencia, volumen, semana) %>%
+  group_by(semana) %>%
+  summarise(
+    eficiencia = mean(ifelse(eficiencia == 0, NA, eficiencia), na.rm = TRUE),
+    volumen = sum(volumen)
+  )
+
+###################### GRAFICAR RELACION EFICIENCIA Y TIEMPO
+ggplot(relacion_eficiencia_tiempo, aes(x = fecha, y = eficiencia)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_smooth(method = "loess", se = TRUE, color = "blue") +
+  labs(
+    title = "Relación entre Eficiencia y Tiempo",
+    x = "Fecha",
+    y = "Eficiencia Promedio"
+  ) +
+  theme_minimal()
+
+###################### GRAFICAR RELACION EFICIENCIA Y VOLUMEN
+ggplot(relacion_eficiencia_volumen, aes(x = volumen, y = eficiencia)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_smooth(method = "loess", se = TRUE, color = "red") +
+  labs(
+    title = "Relación entre Eficiencia y Volumen",
+    x = "Volumen Total",
+    y = "Eficiencia Promedio"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+
+
+## Gráficos: Torque y Fluidez de Pedaleo en el Tiempo
+
+En este paso, se visualizan las tendencias del torque y la fluidez de pedaleo del atleta a lo largo del tiempo.
+
+### Graficar Torque en el Tiempo
+
+```{r graficar_torque_tiempo, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### GRAFICAR TORQUE EN EL TIEMPO
+# VISUALIZAMOS LA RELACIÓN ENTRE EL TORQUE Y EL TIEMPO
+ggplot(sesion_limpia, aes(x = fecha, y = torque)) +
+  geom_point(size = 2, alpha = 0.7, color = "blue") +
+  geom_smooth(method = "loess", se = TRUE, color = "darkblue") +
+  labs(
+    title = "Torque en el Tiempo",
+    x = "Fecha",
+    y = "Torque"
+  ) +
+  theme_minimal()
+
+
+###################### GRAFICAR FLUIDEZ DE PEDALEO EN EL TIEMPO
+# VISUALIZAMOS LA RELACIÓN ENTRE LA FLUIDEZ DE PEDALEO Y EL TIEMPO
+ggplot(sesion_limpia, aes(x = fecha, y = fluidez_torque)) +
+  geom_point(size = 2, alpha = 0.7, color = "green") +
+  geom_smooth(method = "loess", se = TRUE, color = "darkgreen") +
+  labs(
+    title = "Fluidez de Pedaleo en el Tiempo",
+    x = "Fecha",
+    y = "Fluidez del Torque"
+  ) +
+  theme_minimal()
+
+
+
+```
+
+## Análisis Previo a la Serie Temporal
+
+En este paso, se seleccionan las variables clave para el análisis y se realiza un tratamiento inicial de los valores atípicos.
+
+```{r analisis_previo_serie_temporal, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### SELECCIONAR VARIABLES PARA EL ANÁLISIS
+# EXTRAEMOS LAS VARIABLES RELEVANTES DE RECORDS LIMPIOS
+records_small <- records_limpia %>%
+  dplyr::select(
+    fecha = timestamp,       # FECHA DEL REGISTRO
+    frecuencia = heart_rate, # FRECUENCIA CARDIACA
+    potencia = power,        # POTENCIA GENERADA
+    cadencia = cadence       # CADENCIA DE PEDALEO
+  )
+
+###################### SUSTITUCIÓN DE OUTLIERS POR NA
+# LOS VALORES DE FRECUENCIA CARDIACA SUPERIORES A 215 SON CONSIDERADOS OUTLIERS
+records_small <- records_small %>%
+  mutate(frecuencia = ifelse(frecuencia > 215, NA, frecuencia))
+
+```
+
+## Búsqueda de Patrones de Datos Faltantes
+
+Este paso explora los datos faltantes en el conjunto `records_small`, identifica patrones y prepara estrategias para imputarlos.
+
+```{r patrones_datos_faltantes, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### RESUMEN Y ESTRUCTURA DEL DATAFRAME
+# RESUMEN GENERAL DE LOS DATOS
+summary(records_small)
+
+# ESTRUCTURA DETALLADA DE LAS VARIABLES
+str(records_small)
+
+###################### VISUALIZACIÓN DE PATRONES DE DATOS FALTANTES
+# GRAFICAR PATRONES DE FALTANTES USANDO VIM
+VIM::aggr(
+  records_small,
+  col = c("navyblue", "red"), # AZUL PARA COMPLETO, ROJO PARA FALTANTE
+  numbers = TRUE,             # MOSTRAR PORCENTAJES
+  sortVars = TRUE,            # ORDENAR VARIABLES POR PATRONES
+  labels = names(records_small),
+  cex.axis = 0.7,
+  gap = 3,
+  ylab = c("Distribución de Valores Faltantes", "Patrones de Faltantes")
+)
+
+# IDENTIFICAR PATRONES DE DATOS FALTANTES USANDO MICE
+mice::md.pattern(records_small)
+
+###################### OBSERVACIONES SOBRE LOS DATOS FALTANTES
+# SEGÚN LOS GRÁFICOS, EL MAYOR VOLUMEN DE VALORES FALTANTES
+# SE ENCUENTRA EN LA VARIABLE DE FRECUENCIA CARDIACA.
+# PROPONEMOS IMPUTAR ESTOS VALORES USANDO UN MODELO DE MEDIAS PREDICTIVAS.
+
+```
+
+## Modelo de Imputación de Datos Faltantes con Predictive Mean Matching
+
+Este paso utiliza el paquete `mice` para imputar valores faltantes en las variables seleccionadas mediante el método Predictive Mean Matching (PMM).
+
+```{r imputacion_datos_faltantes, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### SELECCIÓN DE VARIABLES PARA IMPUTACIÓN
+# DEFINIMOS LAS VARIABLES QUE SERÁN IMPUTADAS
+columnas <- c("frecuencia", "potencia", "cadencia")
+
+###################### MODELO DE IMPUTACIÓN CON PMM
+# CREAMOS EL MODELO DE IMPUTACIÓN UTILIZANDO mice
+imputacion <- mice::mice(
+  records_small[, columnas],
+  m = 5,                # NÚMERO DE CONJUNTOS IMPUTADOS
+  maxit = 10,           # ITERACIONES PARA LA CONVERGENCIA
+  method = "pmm",       # MÉTODO DE IMPUTACIÓN (PREDICTIVE MEAN MATCHING)
+  seed = 1              # SEMILLA PARA REPRODUCIBILIDAD
+)
+
+###################### RESUMEN DEL MODELO
+# MOSTRAMOS UN RESUMEN DEL MODELO DE IMPUTACIÓN
+summary(imputacion)
+
+###################### COMPLETAR LOS DATOS IMPUTADOS
+# OBTENEMOS EL DATAFRAME COMPLETO CON LOS DATOS IMPUTADOS
+imputacion_completo <- mice::complete(imputacion)
+
+```
+
+## Creación de Nuevas Variables
+
+Este paso genera nuevas variables a partir de los datos imputados y realiza transformaciones para el análisis.
+
+```{r creacion_nuevas_variables, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### CREACIÓN DE VARIABLES NUEVAS
+# SEPARAR LA COLUMNA DE FECHA Y HORA
+records_final <- records_small %>%
+  tidyr::separate(
+    col = fecha,
+    into = c("fecha", "hora"), # DIVIDIMOS EN FECHA Y HORA
+    sep = " "
+  )
+
+###################### ASIGNAR VALORES IMPUTADOS AL DATAFRAME
+# INCLUIMOS LOS DATOS IMPUTADOS EN EL DATAFRAME FINAL
+records_final$potencia <- imputacion_completo$potencia
+records_final$frecuencia <- imputacion_completo$frecuencia
+records_final$cadencia <- imputacion_completo$cadencia
+
+###################### CREACIÓN DE VARIABLES DERIVADAS
+# CONVERTIR FECHA A FORMATO YMD Y CALCULAR EL TORQUE
+records_final <- records_final %>%
+  mutate(
+    fecha = ymd(fecha), # CONVERTIMOS FECHA A FORMATO YYYY-MM-DD
+    torque = potencia / ((cadencia * 2 * pi) / 60) # CÁLCULO DE TORQUE
+  )
+
+###################### TRATAMIENTO DE OUTLIERS EN TORQUE
+# LIMITAR TORQUE A UN MÁXIMO DE 500 Y SUSTITUIR NA POR 0
+records_final <- records_final %>%
+  mutate(
+    torque = ifelse(torque > 500, 0, torque),
+    torque = replace_na(torque, 0)
+  )
+
+###################### CREACIÓN DE VARIABLES DE ZONAS
+# INICIALIZAMOS VARIABLES PARA ZONAS DE ENTRENAMIENTO
+records_final <- records_final %>%
+  mutate(
+    zona_1 = 0,       # INDICADOR PARA ZONA 1
+    zona_2 = 0,       # INDICADOR PARA ZONA 2
+    zona_3 = 0,       # INDICADOR PARA ZONA 3
+    zona = "Z2",      # ASIGNACIÓN PREDETERMINADA DE ZONA
+    conteo = 1        # CONTADOR POR REGISTRO
+  )
+
+```
+
+## Obtener Datos que Training Peaks No Proporciona
+
+En este paso, se calculan las zonas de pulso basadas en la frecuencia cardíaca máxima, se clasifican los datos por zonas, y se resumen métricas clave por fecha.
+
+```{r calcular_zonas_y_resumen, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### DEFINIR ZONAS DE PULSO BASADAS EN FC MAX
+# FRECUENCIA CARDÍACA MÁXIMA TOMADA DE LOS DATOS DE SESIONES COMPLETAS
+fc_max <- sesiones_completo$FcMax[1]
+
+# DEFINIMOS LOS LÍMITES PARA LAS ZONAS
+zona1 <- fc_max * 0.6 # LÍMITE SUPERIOR DE ZONA 1
+zona3 <- fc_max * 0.8 # LÍMITE INFERIOR DE ZONA 3
+
+###################### CLASIFICAR REGISTROS EN ZONAS
+# CLASIFICAMOS LAS FRECUENCIAS EN LAS ZONAS DEFINIDAS
+records_final <- records_final %>%
+  mutate(
+    zona = case_when(
+      frecuencia < zona1 ~ "Z1",
+      frecuencia > zona3 ~ "Z3",
+      TRUE ~ "Z2"
+    ),
+    zona_1 = ifelse(zona == "Z1", 1, 0),
+    zona_2 = ifelse(zona == "Z2", 1, 0),
+    zona_3 = ifelse(zona == "Z3", 1, 0)
+  )
+
+###################### RESUMIR MÉTRICAS CLAVE POR FECHA
+# AGRUPAMOS POR FECHA Y RESUMIMOS MÉTRICAS RELEVANTES
+records_resumen <- records_final %>%
+  group_by(fecha) %>%
+  summarise(
+    inicio = first(hora),                    # HORA DE INICIO
+    fin = last(hora),                        # HORA DE FIN
+    zona1 = sum(zona_1),                     # TOTAL DE DATOS EN ZONA 1
+    zona2 = sum(zona_2),                     # TOTAL DE DATOS EN ZONA 2
+    zona3 = sum(zona_3),                     # TOTAL DE DATOS EN ZONA 3
+    conteo = sum(conteo),                    # TOTAL DE REGISTROS
+    torque_medio = mean(torque, na.rm = TRUE), # TORQUE PROMEDIO
+    torque_max = max(torque, na.rm = TRUE),   # TORQUE MÁXIMO
+    torque_mediana = median(torque, na.rm = TRUE), # TORQUE MEDIANO
+    torque_Q_75 = quantile(torque, 0.75, na.rm = TRUE), # CUARTIL 75% DEL TORQUE
+    torque_IQR = IQR(torque, na.rm = TRUE),   # RANGO INTERCUARTIL
+    potencia_media = mean(potencia, na.rm = TRUE), # POTENCIA PROMEDIO
+    potencia_mediana = median(potencia, na.rm = TRUE), # POTENCIA MEDIANA
+    frecuencia_cardiaca_media = mean(frecuencia, na.rm = TRUE), # FRECUENCIA PROMEDIO
+    cadencia_media = mean(cadencia, na.rm = TRUE) # CADENCIA PROMEDIO
+  )
+
+###################### CALCULAR VOLUMEN Y PORCENTAJE DE TIEMPO EN CADA ZONA
+# CALCULAMOS EL TIEMPO TOTAL Y EL PORCENTAJE POR ZONA
+records_resumen <- records_resumen %>%
+  mutate(
+    inicio = hms(inicio),                    # CONVERTIR HORA DE INICIO A FORMATO hms
+    fin = hms(fin),                          # CONVERTIR HORA DE FIN A FORMATO hms
+    volumen = as.numeric(difftime(fin, inicio, units = "secs")), # TIEMPO TOTAL
+    P_Z1 = zona1 / conteo,                   # PORCENTAJE EN ZONA 1
+    P_Z2 = zona2 / conteo,                   # PORCENTAJE EN ZONA 2
+    P_Z3 = zona3 / conteo                    # PORCENTAJE EN ZONA 3
+  )
+
+```
+
+
+## Guardar la Sesión de Trabajo
+
+Este paso guarda el resumen final de los datos procesados en un archivo para uso posterior.
+
+```{r guardar_sesion_trabajo, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### GUARDAR EL DATAFRAME RESUMEN
+# GUARDAMOS EL DATAFRAME `records_resumen` EN LA RUTA ESPECIFICADA
+save(
+  records_resumen,  # DATAFRAME A GUARDAR
+  file = file.path(ruta_exportar, archivos$guardar_resumenes) # RUTA COMPLETA
+)
+
+```
+
+

@@ -1,0 +1,663 @@
+---
+title: "5.Volumen_Intensidad"
+author: "Aaron Mulvey"
+date: "11/12/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+
+# Condicional para instalar y cargar paquetes necesarios
+packages <- c(
+  "tidyverse", "dplyr", "ggplot2", "readxl", "lubridate",
+  "imputeTS", "Hmisc", "TTR", "dygraphs", "zoo", "tseries", 
+  "dtw", "corrplot", "factoextra", "fpc", "rgeos", "sp", "kableExtra"
+)
+
+for (pkg in packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, dependencies = TRUE)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+# Configuración global de knitr
+knitr::opts_chunk$set(echo = TRUE)
+
+# Configuración de opciones globales
+options(scipen = 999)
+
+```
+
+```{r}
+
+# Cargar datos de Paula y sesiones limpias
+load(file = '../Atletas/June/Export/tfg.june.rda')
+load(file = '../Atletas/June/Export/sesiones_limpias.rda')
+
+# Selección y preparación de datos de sesiones limpias
+sesion <- sesion_limpia %>% 
+  dplyr::select(fecha, peso, fc_basal, fc_max, ftp,
+                semana, TSS_TP, CTL_TP, ATL_TP, TSB_TP, peso)
+
+# Aplicar na_locf correctamente
+sesion$ftp <- na_locf(sesion$ftp)
+
+
+# Preprocesamiento de los datos de Paula
+j <- j %>% mutate(fecha = as.Date(timestamp))
+j$normal_allen <- na_ma(j$normal_allen, k = 30)
+j$normal_aaron <- NULL
+
+# Unir datos de Paula con las sesiones y cálculo de métricas adicionales
+june <- left_join(j, sesion, by = 'fecha') %>% 
+  mutate(
+    eficiencia = normal_allen / heart_rate,
+    eficacia = ifelse(speed == 0, 0, normal_allen / speed), # Condición para eficacia
+    vo2max = (power / 75) * (1000 / peso) / ((heart_rate - fc_basal) / (fc_max - fc_basal)),
+    torque = power / ((cadence * 2 * pi) / 60),
+    conteo = 1
+  )
+
+# Tratamiento de outliers
+june$torque[june$torque > 500] <- NA
+june$torque <- na.locf(june$torque)
+june$eficacia[june$eficacia > 100] <- NA
+june$eficacia <- na.locf(june$eficacia)
+june$vo2max[june$vo2max > 1200] <- NA
+june$vo2max <- na.locf(june$vo2max)
+
+# Guardar datos procesados
+data <- june
+save(data, file = '../Atletas/June/Export/data.rda')
+
+# Resumir datos por semana
+resumen <- june %>% 
+  mutate(fecha = as.Date(timestamp)) %>% 
+  group_by(semana) %>% 
+  summarise(
+    fecha = first(fecha),
+    volumen = sum(conteo),
+    ftp = mean(ftp),
+    norm = mean(normal_allen),
+    eficiencia = mean(eficiencia),
+    eficacia = mean(eficacia),
+    torque = mean(torque),
+    vo2 = mean(vo2max),
+    semana = first(semana)
+  )
+
+resumen <- resumen[!duplicated(resumen$fecha), ]
+
+# Cálculo de regresión y predicción
+regresion <- resumen %>% 
+  mutate(
+    int = norm / ftp,
+    TSS = ((volumen * norm * int) / (ftp * 3600)) * 100,
+    volumen = volumen / 3600,
+    intensidad = TSS / volumen
+  ) %>% 
+  arrange(fecha)
+
+# Modelos de regresión
+r.eficiencia <- regresion %>% select(volumen, intensidad, eficiencia)
+
+# Modelo de regresión para volumen y eficiencia
+v.ef1 <- lm(formula = eficiencia ~ volumen, data = r.eficiencia)
+summary(v.ef1)
+p.v.ef1 <- predict(v.ef1)
+
+# Modelo de regresión para intensidad y eficiencia
+i.ef1 <- lm(formula = eficiencia ~ intensidad, data = r.eficiencia)
+summary(i.ef1)
+p.i.ef1 <- predict(i.ef1)
+
+
+```
+
+##Eficacia
+
+```{r}
+
+###################### MODELO DE EFICACIA
+
+# Seleccionar variables clave para el análisis
+r.eficacia <- regresion %>% 
+  dplyr::select(volumen, intensidad, eficacia)
+
+# Imputación de valores faltantes utilizando medias móviles
+r.eficacia$eficacia <- na_ma(r.eficacia$eficacia, k = 2)
+
+###################### REGRESIÓN LINEAL - EFICACIA VS VOLUMEN
+
+# Ajustar el modelo de regresión lineal
+v.e <- lm(formula = eficacia ~ volumen, data = r.eficacia)
+
+# Resumen del modelo
+summary(v.e)
+
+# Generar predicciones
+p.v.e <- predict(v.e)
+
+###################### REGRESIÓN LINEAL - EFICACIA VS INTENSIDAD
+
+# Ajustar el modelo de regresión lineal
+i.e <- lm(formula = eficacia ~ intensidad, data = r.eficacia)
+
+# Resumen del modelo
+summary(i.e)
+
+# Generar predicciones
+p.i.e <- predict(i.e)
+
+
+```
+##VO2max
+
+```{r}
+# Selección de variables para análisis de VO2
+r.vo2 <- regresion %>% 
+  dplyr::select(volumen, intensidad, vo2)
+
+# Modelo lineal: VO2 en función del volumen
+v.v <- lm(formula = vo2 ~ volumen, data = r.vo2)
+
+# Resumen del modelo de volumen
+summary(v.v)
+
+# Predicciones basadas en el modelo de volumen
+p.v.v <- predict(v.v)
+
+# Modelo lineal: VO2 en función de la intensidad
+i.v <- lm(formula = vo2 ~ intensidad, data = r.vo2)
+
+# Resumen del modelo de intensidad
+summary(i.v)
+
+# Predicciones basadas en el modelo de intensidad
+p.i.v <- predict(i.v)
+
+```
+##Torque
+```{r}
+
+# Selección de variables para análisis de Torque
+r.t <- regresion %>% 
+  dplyr::select(volumen, intensidad, torque)
+
+# Modelo lineal: Torque en función del volumen
+v.t <- lm(formula = torque ~ volumen, data = r.t)
+
+# Resumen del modelo de volumen
+summary(v.t)
+
+# Predicciones basadas en el modelo de volumen
+p.v.t <- predict(v.t)
+
+# Modelo lineal: Torque en función de la intensidad
+i.t <- lm(formula = torque ~ intensidad, data = r.t)
+
+# Resumen del modelo de intensidad
+summary(i.t)
+
+# Predicciones basadas en el modelo de intensidad
+p.i.t <- predict(i.t)
+
+
+```
+##Respuesta
+```{r}
+
+
+# Modelo de Eficacia
+modelo_e <- lm(eficacia ~ ., data = r.eficacia)
+e1 <- modelo_e$coefficients[2]  # Coeficiente para volumen
+e2 <- modelo_e$coefficients[3]  # Coeficiente para intensidad
+
+# Modelo de Eficiencia
+modelo_ef <- lm(eficiencia ~ ., data = r.eficiencia)
+ef1 <- modelo_ef$coefficients[2]  # Coeficiente para volumen
+ef2 <- modelo_ef$coefficients[3]  # Coeficiente para intensidad
+
+# Modelo de Torque
+modelo_t <- lm(torque ~ ., data = r.t)
+t1 <- modelo_t$coefficients[2]  # Coeficiente para volumen
+t2 <- modelo_t$coefficients[3]  # Coeficiente para intensidad
+
+# Modelo de VO2 Max
+modelo_v <- lm(vo2 ~ ., data = r.vo2)
+v1 <- modelo_v$coefficients[2]  # Coeficiente para volumen
+v2 <- modelo_v$coefficients[3]  # Coeficiente para intensidad
+
+
+
+```
+
+##Modelo
+```{r}
+
+# Agrupar datos por fecha
+red <- june %>% 
+  mutate(fecha = as.Date(timestamp)) %>% 
+  dplyr::group_by(fecha)
+
+# Resumir datos diarios y calcular métricas
+red <- red %>% 
+  dplyr::summarise(
+    fecha = first(fecha),
+    volumen = sum(conteo),               # Volumen total
+    ftp = mean(ftp),                     # Promedio de FTP
+    norm = mean(normal_allen),           # Potencia normalizada promedio
+    eficiencia = mean(eficiencia),       # Promedio de eficiencia
+    eficacia = mean(eficacia),           # Promedio de eficacia
+    torque = mean(torque),               # Promedio de torque
+    vo2 = mean(vo2max),                  # Promedio de VO2 max
+    semana = first(semana),              # Número de semana
+    TSB = mean(TSB_TP),                  # Promedio de TSB
+    CTL = mean(CTL_TP),                  # Promedio de CTL
+    ATL = mean(ATL_TP),                  # Promedio de ATL
+    TSS = sum(TSS_TP),                   # Total de TSS
+    peso = mean(peso)                    # Promedio de peso
+  ) %>% 
+  mutate(
+    w.kg = ftp / peso,                   # Relación W/kg
+    volumen = volumen / 3600,            # Conversión de volumen a horas
+    intensidad = TSS / volumen           # Cálculo de intensidad
+  )
+
+# Seleccionar variables clave para análisis adicional
+red.1 <- red %>% 
+  dplyr::select(volumen, intensidad, TSS, eficiencia)
+
+
+```
+#RED NEURONAL PARA SABER LA EFICIENCIA SEMANAL RESPECTO A VARIABLES
+```{r}
+
+###################### DIVIDIR DATOS EN CONJUNTO DE PRUEBA Y ENTRENAMIENTO
+
+set.seed(1)
+
+# Preparación de los datos
+datos <- red.1
+n <- nrow(datos)
+muestra <- sample(n, n * 0.80)
+train <- datos[muestra, ]
+test <- datos[-muestra, ]
+
+###################### NORMALIZACIÓN DE LAS VARIABLES
+
+# Calcular máximos y mínimos para normalización
+maxs <- apply(train, 2, max)
+mins <- apply(train, 2, min)
+
+# Normalizar los datos entre 0 y 1
+datos_nrm <- as.data.frame(scale(datos, center = mins, scale = maxs - mins))
+train_nrm <- datos_nrm[muestra, ]
+test_nrm <- datos_nrm[-muestra, ]
+
+###################### FORMULA PARA EL MODELO
+
+# Crear fórmula dinámica para la red neuronal
+nms <- names(train_nrm)
+frml <- as.formula(paste(
+  'eficiencia ~',
+  paste(nms[!nms %in% 'eficiencia'], collapse = ' + ')
+))
+
+###################### ENTRENAMIENTO DEL MODELO
+
+# Configurar y entrenar la red neuronal
+modelo.nn <- neuralnet::neuralnet(
+  frml,
+  data = train_nrm,
+  hidden = c(7, 5),
+  threshold = 0.05,
+  algorithm = 'rprop+'
+)
+
+###################### PREDICCIÓN
+
+# Realizar predicciones sobre el conjunto de prueba
+pr.nn <- neuralnet::compute(x = modelo.nn, within(test_nrm, rm(eficiencia)))
+
+###################### DESNORMALIZACIÓN DE LOS RESULTADOS
+
+# Transformar resultados predichos y reales a su escala original
+eficiencia.predict <- pr.nn$net.result * (max(datos$eficiencia) - min(datos$eficiencia)) + min(datos$eficiencia)
+eficiencia.real <- (test_nrm$eficiencia) * (max(datos$eficiencia) - min(datos$eficiencia)) + min(datos$eficiencia)
+
+###################### CÁLCULO DEL ERROR CUADRÁTICO
+
+se.nn <- sum((eficiencia.real - eficiencia.predict)^2 / nrow(test_nrm))
+
+###################### GRAFICAR RESULTADOS
+
+# Gráfico de comparación entre valores reales y predichos
+qplot(
+  x = eficiencia.real,
+  y = eficiencia.predict,
+  geom = c('point', 'smooth'),
+  method = 'lm',
+  main = paste(
+    'Real vs Predicción | Suma de Error Cuadrático:',
+    round(se.nn, 5)
+  )
+) + 
+  labs(x = 'Eficiencia Real', y = 'Eficiencia Predicha') +
+  theme_minimal()
+
+# Visualización de la estructura de la red neuronal
+plot(modelo.nn)
+
+
+###################### DIVIDIR DATOS EN CONJUNTO DE PRUEBA Y ENTRENAMIENTO
+
+set.seed(1)
+
+# Preparación de los datos
+datos <- red.1
+n <- nrow(datos)
+muestra <- sample(n, n * 0.80)
+train <- datos[muestra, ]
+test <- datos[-muestra, ]
+
+###################### NORMALIZACIÓN DE LAS VARIABLES
+
+# Calcular máximos y mínimos para normalización
+maxs <- apply(train, 2, max)
+mins <- apply(train, 2, min)
+
+# Normalizar los datos entre 0 y 1
+datos_nrm <- as.data.frame(scale(datos, center = mins, scale = maxs - mins))
+train_nrm <- datos_nrm[muestra, ]
+test_nrm <- datos_nrm[-muestra, ]
+
+###################### FORMULA PARA EL MODELO
+
+# Crear fórmula dinámica para la red neuronal
+nms <- names(train_nrm)
+frml <- as.formula(paste(
+  'eficiencia ~',
+  paste(nms[!nms %in% 'eficiencia'], collapse = ' + ')
+))
+
+###################### ENTRENAMIENTO DEL MODELO
+
+# Configurar y entrenar la red neuronal
+modelo.nn <- neuralnet::neuralnet(
+  frml,
+  data = train_nrm,
+  hidden = c(7, 5),
+  threshold = 0.05,
+  algorithm = 'rprop+'
+)
+
+###################### PREDICCIÓN
+
+# Realizar predicciones sobre el conjunto de prueba
+pr.nn <- neuralnet::compute(x = modelo.nn, within(test_nrm, rm(eficiencia)))
+
+###################### DESNORMALIZACIÓN DE LOS RESULTADOS
+
+# Transformar resultados predichos y reales a su escala original
+eficiencia.predict <- pr.nn$net.result * (max(datos$eficiencia) - min(datos$eficiencia)) + min(datos$eficiencia)
+eficiencia.real <- (test_nrm$eficiencia) * (max(datos$eficiencia) - min(datos$eficiencia)) + min(datos$eficiencia)
+
+###################### CÁLCULO DEL ERROR CUADRÁTICO
+
+se.nn <- sum((eficiencia.real - eficiencia.predict)^2 / nrow(test_nrm))
+
+###################### GRAFICAR RESULTADOS
+
+# Gráfico de comparación entre valores reales y predichos
+qplot(
+  x = eficiencia.real,
+  y = eficiencia.predict,
+  geom = c('point', 'smooth'),
+  method = 'lm',
+  main = paste(
+    'Real vs Predicción | Suma de Error Cuadrático:',
+    round(se.nn, 5)
+  )
+) + 
+  labs(x = 'Eficiencia Real', y = 'Eficiencia Predicha') +
+  theme_minimal()
+
+# Visualización de la estructura de la red neuronal
+plot(modelo.nn)
+
+
+```
+
+#RED NEURONAL PARA SABER LA EFICIENCIA SEMANAL RESPECTO A VARIABLES
+```{r}
+
+
+red.2 <- red %>% 
+  dplyr::select(volumen, intensidad, TSS, vo2)
+
+###################### DIVIDIR DATOS EN CONJUTO DE PRUEBA Y ENTRENAMIENTO
+
+set.seed(1)
+
+datos <- red.1
+n <- nrow(datos)
+muestra <- sample(n, n * 0.80)
+train <- datos[muestra,]
+test <- datos[- muestra,]
+
+###################### NORMALIZACION DE LAS VARIABLES
+
+maxs <- apply(train, 2, max)
+mins <- apply(train, 2, min)
+datos_nrm <- as.data.frame(scale(datos, center = mins, scale = maxs - mins))
+train_nrm <- datos_nrm[muestra,]
+test_nrm <- datos_nrm[- muestra,]
+
+###################### FORMULA
+
+nms <- names(train_nrm)
+frml <- as.formula(paste('eficiencia ~',
+                         paste(nms[!nms %in% 'eficiencia'],
+                               collapse = ' + ')))
+
+###################### MODELO
+
+modelo.nn <- neuralnet::neuralnet(frml,
+                                  data = train_nrm,
+                                  hidden = c(7,5),
+                                  threshold = 0.05,
+                                  algorithm = 'rprop+')
+
+###################### PREDICCION
+
+pr.nn <- neuralnet::compute(x = modelo.nn,within(test_nrm,rm(eficiencia)))
+
+###################### TRANSFORMACION DE ESCALAR A NOMINAL
+
+eficiencia.predict <- 
+  pr.nn$net.result*(max(datos$eficiencia)-min(datos$eficiencia))+min(datos$eficiencia)
+
+eficiencia.real <- 
+  (test_nrm$eficiencia)*(max(datos$eficiencia)-min(datos$eficiencia))+min(datos$eficiencia)
+
+###################### ERROR CUADRATICO
+
+(se.nn <- sum((eficiencia.real - eficiencia.predict)^2/nrow(test_nrm)))
+
+###################### GRAFICAR
+
+# Gráfico de comparación entre valores reales y predichos
+qplot(
+  x = eficiencia.real,
+  y = eficiencia.predict,
+  geom = c('point', 'smooth'),
+  method = 'lm',
+  main = paste(
+    'Real vs Predicción | Suma de Error Cuadrático:',
+    round(se.nn, 5)
+  )
+) + 
+  labs(x = 'Eficiencia Real', y = 'Eficiencia Predicha') +
+  theme_minimal()
+
+plot(modelo.nn)
+###################### DIVIDIR DATOS EN CONJUNTO DE PRUEBA Y ENTRENAMIENTO
+
+set.seed(1)
+
+# Preparación de los datos
+datos <- red.2
+n <- nrow(datos)
+muestra <- sample(n, n * 0.80)
+train <- datos[muestra, ]
+test <- datos[-muestra, ]
+
+###################### NORMALIZACIÓN DE LAS VARIABLES
+
+# Calcular máximos y mínimos para normalización
+maxs <- apply(train, 2, max)
+mins <- apply(train, 2, min)
+
+# Normalizar los datos entre 0 y 1
+datos_nrm <- as.data.frame(scale(datos, center = mins, scale = maxs - mins))
+train_nrm <- datos_nrm[muestra, ]
+test_nrm <- datos_nrm[-muestra, ]
+
+###################### FORMULA PARA EL MODELO
+
+# Crear fórmula dinámica para la red neuronal
+nms <- names(train_nrm)
+frml <- as.formula(paste(
+  'vo2 ~',
+  paste(nms[!nms %in% 'vo2'], collapse = ' + ')
+))
+
+###################### ENTRENAMIENTO DEL MODELO
+
+# Configurar y entrenar la red neuronal
+modelo.nn <- neuralnet::neuralnet(
+  frml,
+  data = train_nrm,
+  hidden = c(7, 5),
+  threshold = 0.05,
+  algorithm = 'rprop+'
+)
+
+###################### PREDICCIÓN
+
+# Realizar predicciones sobre el conjunto de prueba
+pr.nn <- neuralnet::compute(x = modelo.nn, within(test_nrm, rm(vo2)))
+
+###################### DESNORMALIZACIÓN DE LOS RESULTADOS
+
+# Transformar resultados predichos y reales a su escala original
+vo2.predict <- pr.nn$net.result * (max(datos$vo2) - min(datos$vo2)) + min(datos$vo2)
+vo2.real <- test_nrm$vo2 * (max(datos$vo2) - min(datos$vo2)) + min(datos$vo2)
+
+###################### CÁLCULO DEL ERROR CUADRÁTICO
+
+se.nn <- sum((vo2.real - vo2.predict)^2 / nrow(test_nrm))
+
+###################### GRAFICAR RESULTADOS
+
+# Gráfico de comparación entre valores reales y predichos
+qplot(
+  x = vo2.real,
+  y = vo2.predict,
+  geom = c('point', 'smooth'),
+  method = 'lm',
+  main = paste(
+    'Real vs Predicción | Suma de Error Cuadrático:',
+    round(se.nn, 5)
+  )
+) + 
+  labs(x = 'VO2 Real', y = 'VO2 Predicho') +
+  theme_minimal()
+
+# Visualización de la estructura de la red neuronal
+plot(modelo.nn)
+
+
+###################### DIVIDIR DATOS EN CONJUNTO DE PRUEBA Y ENTRENAMIENTO
+
+set.seed(1)
+
+# Separar los datos en entrenamiento (80%) y prueba (20%)
+datos <- red.1
+n <- nrow(datos)
+muestra <- sample(n, n * 0.80)
+train <- datos[muestra, ]
+test <- datos[-muestra, ]
+
+###################### NORMALIZACIÓN DE LAS VARIABLES
+
+# Calcular máximos y mínimos para normalizar los datos
+maxs <- apply(train, 2, max)
+mins <- apply(train, 2, min)
+
+# Normalizar los datos a escala [0, 1]
+datos_nrm <- as.data.frame(scale(datos, center = mins, scale = maxs - mins))
+train_nrm <- datos_nrm[muestra, ]
+test_nrm <- datos_nrm[-muestra, ]
+
+###################### CREAR FORMULA DINÁMICA
+
+# Generar fórmula para usar en la red neuronal
+nms <- names(train_nrm)
+frml <- as.formula(paste(
+  'eficiencia ~',
+  paste(nms[!nms %in% 'eficiencia'], collapse = ' + ')
+))
+
+###################### ENTRENAR EL MODELO
+
+# Entrenar la red neuronal con 2 capas ocultas (7 y 5 neuronas)
+modelo.nn <- neuralnet::neuralnet(
+  frml,
+  data = train_nrm,
+  hidden = c(7, 5),
+  threshold = 0.05,
+  algorithm = 'rprop+'
+)
+
+###################### REALIZAR PREDICCIONES
+
+# Generar predicciones en el conjunto de prueba
+pr.nn <- neuralnet::compute(modelo.nn, within(test_nrm, rm(eficiencia)))
+
+###################### DESNORMALIZAR LOS RESULTADOS
+
+# Transformar los valores predichos y reales a la escala original
+eficiencia.predict <- pr.nn$net.result * (max(datos$eficiencia) - min(datos$eficiencia)) + min(datos$eficiencia)
+eficiencia.real <- test_nrm$eficiencia * (max(datos$eficiencia) - min(datos$eficiencia)) + min(datos$eficiencia)
+
+###################### CÁLCULO DEL ERROR CUADRÁTICO
+
+# Calcular el error cuadrático entre los valores reales y predichos
+se.nn <- sum((eficiencia.real - eficiencia.predict)^2 / nrow(test_nrm))
+
+###################### GRAFICAR RESULTADOS
+
+# Comparación entre valores reales y predichos
+qplot(
+  x = eficiencia.real,
+  y = eficiencia.predict,
+  geom = c('point', 'smooth'),
+  method = 'lm',
+  main = paste(
+    'Real vs Predicción | Suma de Error Cuadrático:',
+    round(se.nn, 5)
+  )
+) + 
+  labs(x = 'Eficiencia Real', y = 'Eficiencia Predicha') +
+  theme_minimal()
+
+# Visualizar la estructura de la red neuronal
+plot(modelo.nn)
+
+
+```
+

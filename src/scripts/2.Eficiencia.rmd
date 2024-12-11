@@ -1,0 +1,278 @@
+---
+title: "Eficiencia"
+author: "Aaron Mulvey"
+date: "11/12/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# Configuración global para knitr
+knitr::opts_chunk$set(echo = TRUE)
+
+# Instalación y carga de paquetes
+required_packages <- c(
+  "tidyverse", "dplyr", "lubridate", "ggplot2",
+  "zoo", "dygraphs"
+)
+
+install_and_load <- function(packages) {
+  for (pkg in packages) {
+    if (!require(pkg, character.only = TRUE)) {
+      install.packages(pkg, dependencies = TRUE)
+      library(pkg, character.only = TRUE)
+    }
+  }
+}
+
+install_and_load(required_packages)
+
+# Limpiar el entorno de trabajo
+rm(list = ls())
+
+# Configuración de opciones globales
+options(scipen = 999)
+
+```
+
+## Crear Variables para Reproducción
+
+Este bloque define las variables necesarias para garantizar la reproducibilidad del análisis. Incluye configuraciones de rutas y carga de datos previos procesados.
+
+```{r crear_variables_reproduccion, echo=TRUE}
+
+###################### ESTABLECER DIRECTORIO DE TRABAJO
+
+setwd('../Scripts')
+
+###################### DEFINIR VARIABLES PARA REPRODUCIBILIDAD
+
+# Configuración de atleta y directorios
+atleta <- 'June'
+directorio <- '../Atletas'
+subdirs <- list(importar = 'Import', exportar = 'Export')
+
+# Nombres de archivos clave
+archivos <- list(
+  sesiones_limpias = 'sesiones_limpias.rda',
+  records_resumenes = 'records_resumenes.rda'
+)
+
+###################### CREAR RUTAS DINÁMICAS DE IMPORTACIÓN Y EXPORTACIÓN
+
+ruta_importar <- file.path(directorio, atleta, subdirs$importar)
+ruta_exportar <- file.path(directorio, atleta, subdirs$exportar)
+
+###################### IMPORTAR DATOS DE SESIONES Y RECORDS
+
+# Cargar datos de sesiones limpias
+load(file.path(ruta_exportar, archivos$sesiones_limpias))
+
+# Cargar datos resumidos de records
+load(file.path(ruta_exportar, archivos$records_resumenes))
+
+```
+
+
+## Unir Resúmenes con Sesiones
+
+En este bloque se combinan las métricas resumidas de `records_resumen` con las métricas diarias de `sesion_limpia`. Además, se calculan tiempos en zonas y se preparan series temporales para la comparación de datos.
+
+```{r unir_resumenes_sesiones, echo=TRUE}
+
+###################### SELECCION DE VARIABLES DE INTERES EN RESUMENES
+# FILTRAMOS LAS VARIABLES CLAVE DEL RESUMEN DE RECORDS
+resumenes <- records_resumen %>% 
+  dplyr::select(
+    fecha,
+    P_Z1,                      # PORCENTAJE EN ZONA 1
+    P_Z2,                      # PORCENTAJE EN ZONA 2
+    P_Z3,                      # PORCENTAJE EN ZONA 3
+    potencia_media,            # POTENCIA MEDIA
+    frecuencia_cardiaca_media, # FRECUENCIA CARDIACA MEDIA
+    torque_max,                # TORQUE MAXIMO
+    torque_Q_75,               # CUARTIL 75% DEL TORQUE
+    torque_medio               # TORQUE MEDIO
+  )
+
+###################### SELECCION DE VARIABLES DE INTERES EN SESIONES
+# FILTRAMOS LAS VARIABLES CLAVE DE LAS SESIONES LIMPIAS
+sesiones <- sesion_limpia %>% 
+  dplyr::select(
+    fecha,           # FECHA
+    semana,          # SEMANA DEL AÑO
+    volumen,         # VOLUMEN DE ENTRENAMIENTO
+    peso,            # PESO DEL ATLETA
+    eficiencia,      # EFICIENCIA
+    potencia_media,  # POTENCIA MEDIA
+    fc_media,        # FRECUENCIA CARDIACA MEDIA
+    CTL_TP,          # CARGA CRONICA (CTL)
+    ATL_TP,          # CARGA AGUDA (ATL)
+    torque           # TORQUE
+  )
+
+###################### UNIR DATAFRAMES
+# COMBINAMOS LOS DATAFRAMES DE SESIONES Y RESUMENES POR FECHA
+data_completo <- left_join(sesiones, resumenes, by = "fecha")
+
+###################### CALCULAR TIEMPO POR ZONA
+# MULTIPLICAMOS EL VOLUMEN TOTAL POR LOS PORCENTAJES DE CADA ZONA
+data_completo <- data_completo %>% 
+  mutate(
+    zona_1 = volumen * P_Z1, # TIEMPO EN ZONA 1
+    zona_2 = volumen * P_Z2, # TIEMPO EN ZONA 2
+    zona_3 = volumen * P_Z3  # TIEMPO EN ZONA 3
+  )
+
+###################### CREAR SERIES TEMPORALES PARA COMPARACION
+# EXTRAEMOS FECHAS ÚNICAS PARA ORDENAR LAS SERIES TEMPORALES
+fecha <- unique(data_completo$fecha)
+
+###################### SERIES TEMPORALES DE FRECUENCIA CARDIACA
+# COMBINAMOS FRECUENCIAS MEDIAS PROPIAS Y DE TRAINING PEAKS
+c.aaron_frecuencia <- zoo(data_completo$frecuencia_cardiaca_media, order.by = fecha)
+c.training_peaks_frecuencia <- zoo(data_completo$fc_media, order.by = fecha)
+c.frecuencia <- merge.zoo(c.aaron_frecuencia, c.training_peaks_frecuencia)
+
+###################### SERIES TEMPORALES DE POTENCIA
+# COMBINAMOS POTENCIA MEDIA PROPIA Y DE TRAINING PEAKS
+c.aaron_potencia <- zoo(data_completo$potencia_media.y, order.by = fecha)
+c.training_peaks_potencia <- zoo(data_completo$potencia_media.x, order.by = fecha)
+c.potencia <- merge.zoo(c.aaron_potencia, c.training_peaks_potencia)
+
+###################### SERIES TEMPORALES DE TORQUE
+# COMBINAMOS TORQUE MEDIO PROPIO Y DE TRAINING PEAKS
+c.aaron_torque <- zoo(data_completo$torque_medio, order.by = fecha)
+c.training_peaks_torque <- zoo(data_completo$torque, order.by = fecha)
+c.torque <- merge.zoo(c.aaron_torque, c.training_peaks_torque)
+
+```
+
+## Graficar Comparaciones
+
+En este bloque se visualizan las diferencias entre las métricas calculadas y las de Training Peaks mediante gráficos interactivos utilizando `dygraph`.
+
+```{r graficar_comparaciones, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### GRAFICAR FRECUENCIA CARDIACA
+# COMPARACION ENTRE FRECUENCIA CARDIACA MEDIA PROPIA Y TRAINING PEAKS
+dygraph(c.frecuencia) %>% 
+  dyRangeSelector() %>%
+  dyOptions(colors = c("blue", "red")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Frecuencia Cardíaca Media") %>%
+  dyAxis("x", label = "Fecha")
+
+###################### GRAFICAR TORQUE
+# COMPARACION ENTRE TORQUE MEDIO PROPIO Y TRAINING PEAKS
+dygraph(c.torque) %>% 
+  dyRangeSelector() %>%
+  dyOptions(colors = c("green", "orange")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Torque Medio") %>%
+  dyAxis("x", label = "Fecha")
+
+###################### GRAFICAR POTENCIA
+# COMPARACION ENTRE POTENCIA MEDIA PROPIA Y TRAINING PEAKS
+dygraph(c.potencia) %>% 
+  dyRangeSelector() %>%
+  dyOptions(colors = c("purple", "cyan")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Potencia Media") %>%
+  dyAxis("x", label = "Fecha")
+
+###################### FELICES CON LOS RESULTADOS
+```
+
+## Analizar el Torque
+
+En este bloque se comparan las métricas relacionadas con el torque (medio, máximo y submáximo) para evaluar su consistencia y detectar posibles outliers.
+
+```{r analizar_torque, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### CREAR SERIES TEMPORALES DE TORQUE
+# TORQUE MEDIO
+TORQUE_MEDIO <- zoo(data_completo$torque_medio, order.by = fecha)
+
+# TORQUE MÁXIMO
+TORQUE_MAXIMO <- zoo(data_completo$torque_max, order.by = fecha)
+
+# TORQUE SUBMÁXIMO (CUARTIL 75%)
+TORQUE_SUBMAXIMO <- zoo(data_completo$torque_Q_75, order.by = fecha)
+
+# UNIR LAS SERIES TEMPORALES EN UN SOLO OBJETO
+TORQUES <- merge.zoo(TORQUE_MAXIMO, TORQUE_MEDIO, TORQUE_SUBMAXIMO)
+
+###################### GRAFICAR LAS SERIES TEMPORALES
+# VISUALIZAR EL COMPORTAMIENTO DE LOS TORQUES
+dygraph(TORQUES) %>% 
+  dyRangeSelector() %>%
+  dyOptions(colors = c("red", "blue", "green")) %>%
+  dyLegend(show = "always", hideOnMouseOut = FALSE) %>%
+  dyAxis("y", label = "Torque (N·m)") %>%
+  dyAxis("x", label = "Fecha") %>%
+  dyHighlight(highlightCircleSize = 5, highlightSeriesBackgroundAlpha = 0.2)
+
+###################### CONCLUSIÓN SOBRE LOS OUTLIERS
+# SE OBSERVA QUE EL TORQUE MÁXIMO PRESENTA OUTLIERS SIGNIFICATIVOS.
+
+```
+## Preparación de Datos para Análisis Semanal
+
+En este bloque, se seleccionan y transforman variables clave de los datos para realizar análisis por semana. Además, se imputan valores faltantes y se generan resúmenes semanales.
+
+```{r preparar_datos, echo=TRUE, message=FALSE, warning=FALSE}
+
+###################### SELECCIÓN DE VARIABLES
+# FILTRAMOS LAS VARIABLES RELEVANTES DEL DATASET
+data <- data_completo %>% 
+  dplyr::select(
+    fecha,
+    semana,
+    volumen,
+    zona_1,
+    zona_2,
+    zona_3,
+    torque,
+    eficiencia
+  )
+
+###################### FORMATO DE DATOS
+# CONVERTIMOS VARIABLES NUMÉRICAS AL FORMATO ADECUADO
+data <- data %>%
+  mutate(
+    volumen = as.numeric(volumen),
+    zona_1 = as.numeric(zona_1),
+    zona_2 = as.numeric(zona_2),
+    zona_3 = as.numeric(zona_3)
+  )
+
+###################### IMPUTACIÓN DE VALORES FALTANTES
+# REMPLAZAMOS NA EN ZONAS POR CERO
+data <- data %>%
+  mutate(
+    zona_1 = replace_na(zona_1, 0),
+    zona_2 = replace_na(zona_2, 0),
+    zona_3 = replace_na(zona_3, 0)
+  )
+
+###################### RESÚMENES SEMANALES
+# AGRUPAMOS POR SEMANA Y GENERAMOS RESÚMENES ESTADÍSTICOS
+data_semanal <- data %>%
+  group_by(semana) %>%
+  summarise(
+    volumen = sum(volumen, na.rm = TRUE),                   # SUMA DEL VOLUMEN TOTAL
+    zona_1 = sum(zona_1, na.rm = TRUE),                     # SUMA DEL TIEMPO EN ZONA 1
+    zona_2 = sum(zona_2, na.rm = TRUE),                     # SUMA DEL TIEMPO EN ZONA 2
+    zona_3 = sum(zona_3, na.rm = TRUE),                     # SUMA DEL TIEMPO EN ZONA 3
+    eficiencia = mean(ifelse(eficiencia == 0, NA, eficiencia), na.rm = TRUE), # PROMEDIO DE EFICIENCIA
+    torque = mean(ifelse(torque == 0, NA, torque), na.rm = TRUE) # PROMEDIO DEL TORQUE
+  ) %>%
+  arrange(semana) # ORDENAMOS POR SEMANA
+
+
+data_semanal
+
+```
+
+

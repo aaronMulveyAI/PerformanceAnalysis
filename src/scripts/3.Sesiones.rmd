@@ -1,0 +1,229 @@
+---
+title: "Analisis Sesion"
+author: "Aaron Mulvey"
+date: "11/12/2024"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(lubridate)
+library(TTR)
+library(dygraphs)
+library(zoo)
+
+if (!requireNamespace("imputeTS", quietly = TRUE)) {
+    install.packages("imputeTS")
+}
+library(imputeTS)
+
+rm(list = ls())
+options(scipen=999)
+
+# Función para dibujar los puntos y agregar la recta de regresión
+panel.reg <- function (x, y) 
+{
+  points(x, y, pch=20)
+  abline(lm(y ~ x), lwd=2, col='dodgerblue2')
+}
+
+# Función para crear el histograma
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="dodgerblue2", ...)
+}
+
+# Función para obtener la correlación
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- abs(cor(x, y))
+  txt <- format(c(r, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  if(missing(cex.cor)) cex <- 0.8/strwidth(txt)
+  text(0.5, 0.5, txt, cex = cex * r)
+}
+
+
+###################### ESTABLECER EL DIRECTORIO DE TRABAJO
+# CONFIGURAR LA RUTA BASE DEL PROYECTO
+setwd('../Scripts')
+
+###################### DEFINIR VARIABLES PARA REPRODUCCIÓN
+# CONFIGURAR VARIABLES PRINCIPALES
+atleta <- 'June'                     # NOMBRE DEL ATLETA
+importar <- 'Import'                  # NOMBRE DEL SUBDIRECTORIO DE IMPORTACIÓN
+exportar <- 'Export'                  # NOMBRE DEL SUBDIRECTORIO DE EXPORTACIÓN
+directorio <- '../Atletas'            # DIRECTORIO BASE DEL PROYECTO
+nombre_guardar_records <- 'records.rda' # NOMBRE DEL ARCHIVO DE REGISTROS A GUARDAR
+
+###################### CREAR RUTAS DE IMPORTACIÓN Y EXPORTACIÓN
+# GENERAR RUTAS COMPLETAS PARA LOS DATOS
+ruta_importar <- file.path(directorio, atleta, importar)  # RUTA DE IMPORTACIÓN
+ruta_exportar <- file.path(directorio, atleta, exportar)  # RUTA DE EXPORTACIÓN
+
+# VERIFICAR RUTAS GENERADAS
+cat("Ruta de importación:", ruta_importar, "\n")
+cat("Ruta de exportación:", ruta_exportar, "\n")
+
+
+###################### CARGAR DATOS DE RECORDS
+# IMPORTAMOS EL DATAFRAME DE RECORDS DESDE LA RUTA ESPECIFICADA
+load(file.path(ruta_exportar, nombre_guardar_records))
+
+###################### CREAR NUEVO DATAFRAME
+# INICIALIZAMOS UN NUEVO DATAFRAME A PARTIR DEL ORIGINAL
+variables <- records_dataframe
+
+###################### IDENTIFICAR Y TRATAR OUTLIERS
+# REEMPLAZAR OUTLIERS EN POTENCIA Y FRECUENCIA CARDIACA POR NA
+variables <- variables %>%
+  mutate(
+    power = ifelse(power > 6000, NA, power), # ELIMINAR OUTLIERS EN POTENCIA
+    heart_rate = ifelse(heart_rate > 240, NA, heart_rate) # ELIMINAR OUTLIERS EN FRECUENCIA CARDIACA
+  )
+
+###################### VISUALIZACIÓN DE OUTLIERS
+# GRÁFICOS DE BOXPLOT PARA DETECTAR OUTLIERS
+par(mfrow = c(1, 3)) # CONFIGURAR LAYOUT DE GRÁFICOS
+boxplot(variables$power, main = "Potencia (Power)", col = "lightblue", ylab = "W")
+boxplot(variables$heart_rate, main = "Frecuencia Cardiaca (Heart Rate)", col = "lightcoral", ylab = "bpm")
+boxplot(variables$cadence, main = "Cadencia (Cadence)", col = "lightgreen", ylab = "RPM")
+par(mfrow = c(1, 1)) # REVERTIR EL LAYOUT
+
+###################### ANÁLISIS DE PATRONES DE DATOS FALTANTES
+# USAMOS VIM PARA VISUALIZAR LOS PATRONES DE DATOS FALTANTES
+VIM::aggr(
+  variables,
+  col = c("navyblue", "red"), # AZUL PARA DATOS COMPLETOS, ROJO PARA FALTANTES
+  numbers = TRUE,             # MOSTRAR NÚMEROS EN EL GRÁFICO
+  sortVars = TRUE,            # ORDENAR VARIABLES POR PATRONES
+  labels = names(variables),  # ETIQUETAS DE LAS VARIABLES
+  cex.axis = 0.7,             # TAMAÑO DEL TEXTO EN EL EJE
+  gap = 3,                    # ESPACIO ENTRE BARRAS
+  ylab = c("Distribución de Valores Faltantes", "Patrones de Faltantes")
+)
+
+###################### CONCLUSIONES SOBRE OUTLIERS Y PATRONES
+# OUTLIERS Y PATRONES FALTANTES HAN SIDO IDENTIFICADOS Y SERÁN TRATADOS POSTERIORMENTE.
+
+
+###################### ELIMINAR DUPLICADOS
+# ELIMINAR REGISTROS DUPLICADOS BASADOS EN EL TIMESTAMP
+variables <- variables[!duplicated(variables$timestamp), ]
+
+###################### IMPUTACIÓN DE VALORES FALTANTES
+# SELECCIONAR COLUMNAS RELEVANTES PARA IMPUTAR
+columnas <- c("power", "heart_rate", "speed", "cadence")
+
+# CREAR EL MODELO DE IMPUTACIÓN USANDO MICE
+imputacion <- mice::mice(
+  variables[, names(variables) %in% columnas],
+  m = 1,
+  maxit = 1,
+  method = "pmm",
+  seed = 1
+)
+
+# RESUMEN DEL MODELO
+summary(imputacion)
+
+# COMPLETAR LOS VALORES IMPUTADOS
+imputacion_completo <- mice::complete(imputacion)
+
+# SUSTITUIR VARIABLES ORIGINALES CON VALORES IMPUTADOS
+variables$power <- imputacion_completo$power
+variables$heart_rate <- imputacion_completo$heart_rate
+variables$cadence <- imputacion_completo$cadence
+
+###################### CREAR POTENCIA NORMALIZADA
+# CALCULAR UNA POTENCIA SUAVIZADA Y NORMALIZADA
+variables <- variables %>%
+  mutate(
+    potencia_normalizada = TTR::SMA(power, n = 10),
+    potencia_normalizada = potencia_normalizada^4,
+    potencia_normalizada = potencia_normalizada^0.25
+  )
+
+# IMPUTAR VALORES FALTANTES EN LA POTENCIA NORMALIZADA
+variables$potencia_normalizada <- na_ma(variables$potencia_normalizada, k = 30)
+
+###################### SELECCIONAR VARIABLES CLAVE
+# FILTRAR VARIABLES RELEVANTES Y RENOMBRARLAS
+variables <- variables %>%
+  dplyr::select(
+    fecha = timestamp,
+    distancia = distance,
+    altura = altitude,
+    potencia = power,
+    potencia_normal = potencia_normalizada,
+    frecuencia_cardiaca = heart_rate,
+    cadencia = cadence
+  )
+
+###################### CALCULAR TORQUE
+# TORQUE COMO RELACIÓN ENTRE POTENCIA Y CADENCIA
+variables <- variables %>%
+  mutate(torque = potencia / ((cadencia * 2 * pi) / 60))
+
+# AJUSTAR OUTLIERS EN TORQUE
+variables$torque[variables$torque > 500] <- 0
+variables$torque[is.na(variables$torque)] <- 0
+
+###################### AGRUPACIONES DE 5 SEGUNDOS
+# AGRUPAR DATOS CADA 5 SEGUNDOS Y CALCULAR MÉTRICAS
+T_05 <- variables %>%
+  mutate(grupo = round_date(fecha, period("5S"))) %>%
+  group_by(grupo) %>%
+  summarise(
+    fecha = first(grupo),
+    a_i = first(altura),
+    a_f = last(altura),
+    torque = mean(torque),
+    potencia = mean(potencia),
+    potencia_normal = mean(potencia_normal),
+    frecuencia_cardiaca = mean(frecuencia_cardiaca)
+  ) %>%
+  mutate(VAM = (a_f - a_i) / 5)
+
+###################### AGRUPACIONES DIARIAS PARA OUTLIERS
+# CALCULAR RESÚMENES ESTADÍSTICOS AGRUPADOS POR DÍA
+T_05.2 <- T_05 %>%
+  mutate(grupo = round_date(fecha, period("1D"))) %>%
+  group_by(grupo) %>%
+  summarise(
+    torque_IQR = IQR(torque),
+    torque_frecuente = median(torque),
+    torque_medio = mean(torque),
+    P_normal_IQR = IQR(potencia_normal),
+    P_normal_mean = mean(potencia_normal)
+  )
+
+###################### RESULTADOS LISTOS PARA ANÁLISIS
+# IMPRIMIR UN RESUMEN DE LAS NUEVAS VARIABLES CALCULADAS
+summary(T_05.2)
+
+# Convertir todas las columnas a numéricas (si corresponde)
+T_05.2 <- T_05.2 %>% mutate(across(everything(), as.numeric))
+
+pairs(
+  T_05.2,
+  upper.panel = panel.reg,
+  diag.panel = panel.hist,
+  lower.panel = panel.smooth
+)
+```
+
+
+
